@@ -1,0 +1,175 @@
+version: '3.7'
+
+networks:
+  ispa:
+    driver: bridge
+    ipam:
+      driver: default
+      config:
+        - subnet: "172.18.0.0/16"
+
+services:
+  zookeeper:
+    image: confluentinc/cp-zookeeper:latest
+    container_name: zookeeper
+    hostname: zookeeper
+    ports:
+      - "2181:2181"
+    environment:
+      - ALLOW_ANONYMOUS_LOGIN=yes
+      - ZOOKEEPER_CLIENT_PORT=2181
+    networks:
+      ispa:
+        ipv4_address: 172.18.0.5
+    healthcheck:
+      test: [ "CMD", "nc", "-z", "localhost", "2181" ]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  kafka:
+    image: confluentinc/cp-kafka:latest
+    container_name: kafka
+    hostname: kafka
+    depends_on:
+      zookeeper:
+        condition: service_healthy
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+    networks:
+      ispa:
+        ipv4_address: 172.18.0.6
+    healthcheck:
+      test: [ "CMD", "bash", "-c", "unset JMX_PORT; /usr/bin/kafka-topics --zookeeper zookeeper:2181 --list" ]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+
+  cassandra:
+    image: cassandra:latest
+    container_name: cassandra
+    hostname: cassandra
+    volumes:
+      - cassandra_data:/var/lib/cassandra
+    ports:
+      - "9042:9042"
+    networks:
+      ispa:
+        ipv4_address: 172.18.0.8
+
+  reddit-producer:
+    image: reddit-producer:latest
+    container_name: reddit-producer
+    hostname: app
+    depends_on:
+      cassandra:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    build:
+      context: ./reddit-producer
+      dockerfile: ./reddit-producer/Dockerfile
+    volumes:
+      - ./reddit-producer/config:/app/config
+    networks:
+      ispa:
+        ipv4_address: 172.18.0.7
+
+  kafdrop:
+    image: obsidiandynamics/kafdrop:latest
+    container_name: kafdrop
+    hostname: kafdrop
+    ports:
+      - "9000:9000"
+    environment:
+      KAFKA_BROKERCONNECT: kafka:9092
+    networks:
+      ispa:
+        ipv4_address: 172.18.0.9
+
+  spark-master:
+    image: my-spark-app:latest
+    container_name: spark-master
+    hostname: spark-master
+    depends_on:
+      reddit-producer:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+      - "7077:7077"
+    volumes:
+      - ./spark/checkpoint:/tmp/checkpoint
+      - ./spark/utils:/opt/bitnami/spark/utils
+    environment:
+      - SPARK_MODE=master
+      - SPARK_RPC_AUTHENTICATION_ENABLED=no
+      - SPARK_RPC_ENCRYPTION_ENABLED=no
+      - SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED=no
+      - SPARK_SSL_ENABLED=no
+    networks:
+      ispa:
+        ipv4_address: 172.18.0.2
+
+  spark-worker-1:
+    image: my-spark-app:latest
+    container_name: spark-worker-1
+    hostname: spark-worker-1
+    depends_on:
+      spark-master:
+        condition: service_healthy
+    environment:
+      - SPARK_MODE=worker
+      - SPARK_MASTER_URL=spark://spark-master:7077
+      - SPARK_WORKER_CORES=2
+      - SPARK_WORKER_MEMORY=1g
+    networks:
+      ispa:
+        ipv4_address: 172.18.0.3
+
+  spark-worker-2:
+    image: my-spark-app:latest
+    container_name: spark-worker-2
+    hostname: spark-worker-2
+    depends_on:
+      spark-master:
+        condition: service_healthy
+    environment:
+      - SPARK_MODE=worker
+      - SPARK_MASTER_URL=spark://spark-master:7077
+      - SPARK_WORKER_CORES=2
+      - SPARK_WORKER_MEMORY=1g
+    networks:
+      ispa:
+        ipv4_address: 172.18.0.4
+
+  model-service:
+    build:
+      context: ./model-service
+    container_name: model-service
+    ports:
+      - "8081:8080"
+    networks:
+      ispa:
+        ipv4_address: 172.18.0.10
+
+  grafana:
+    build:
+      context: .
+      dockerfile: ./grafana/Dockerfile
+    container_name: grafana
+    depends_on:
+      cassandra:
+        condition: service_healthy
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    networks:
+      ispa:
+        ipv4_address: 172.18.0.11
+
+volumes:
+  cassandra_data:
